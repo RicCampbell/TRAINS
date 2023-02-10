@@ -1,0 +1,143 @@
+---
+title: "CPRD_consultation_checking"
+author: "Ric Campbell"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+## FOR INTERNAL PROJECT USE ONLY, PLEASE DO NOT SHARE BEYOND PROJECT TEAM
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(DataExplorer)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(kableExtra)
+library(knitr)
+library(readxl)
+library(aurumpipeline)
+library(arrow)
+```
+
+
+```{r set_up_patient_practice_data, echo = FALSE}
+
+## Read in single file tables that we want
+
+  patients <- fread("D:/source_data/Deliveryv2/Data/Primary care/TRAINS_Extract_Patient_001.txt",
+                    colClasses = "character",
+                    na.strings = "")
+  
+  practices <- fread("D:/source_data/Deliveryv2/Data/Primary care/TRAINS_Extract_Practice_001.txt",
+                    colClasses = "character",
+                    na.strings = "")
+  
+# Change any dates to date types if needed for this
+  
+  patients[, cprd_ddate := as.Date(cprd_ddate, format = "%d/%m/%Y")]
+
+```
+
+``` {r set_up_parquet_data, echo = FALSE}
+
+## Create link to parquet files needed
+
+  consultation <- arrow::open_dataset("D:/TRAINS/data/parquet/consultation",
+                                      format = "parquet")
+
+
+## Check how many consultation dates have an unrealistic year, essentially checking the partitioning worked
+## In future
+  
+  consultation_future <- data.table(consultation %>%
+                                     filter(consdate_year > 2022) %>%
+                                     collect())
+  
+  
+## Pre 2005 as should all be 16 or under in age
+  
+  consultation_old <- data.table(consultation %>%
+                                         filter (consdate_year < 2005) %>%
+                                         collect())
+  
+  
+## Get all consultations in 2021 and 2022 before April, to plot to see if consistent
+  
+  consultation_interest <- data.table(consultation %>%
+                                        filter (consdate_year == 2021 | consdate_year == 2022) %>%
+                                        collect())
+  
+  consultation_interest <- consultation_interest[consdate < "2022-04-01"]
+  
+  
+## Collect total number of consultations
+  
+  total_consultation <- consultation %>%
+                          summarise(N = n()) %>%
+                          collect()
+  
+  
+## Get percentage of total consultation that have incorrect dates
+  
+  percent_future_consultation <- (consultation_future[, .N]/total_consultation)*100
+  
+  percent_old_consultation <- (consultation_old[, .N]/total_consultation)*100
+  
+  
+## How many consultations per person, max average?
+## How many consultations a day for a person, max?
+  
+  consultation_interest[, .N, by = patid][order(N)]
+  consultation_interest[, .N, by = .(patid, consdate)][order(N)]
+  
+#### LOTS of scanned documents or administrative notes, found in consmedcodid, then in Medical Dictionary
+  
+  consultation_interest[, .N, by = consmedcodeid]   ## ~70 consmedcodeids used though!
+  
+  consulation_interest_reason <- consultation_interest[, .N, by = consmedcodeid]
+  
+  
+## Read in the Medical dictionary to attach a readable term (tidy this up as not in good order/code chunks)
+  
+  cprd_medical_dictionary <- fread("D:/source_data/Deliveryv2/Dictionary Browsers/CPRD_CodeBrowser_202205_Aurum/CPRDAurumMedical.txt",
+                                   colClasses = "character")
+  
+  consultation_interest_reason_term <- merge(consulation_interest_reason,
+                                             cprd_medical_dictionary,
+                                             by.x = "consmedcodeid",
+                                             by.y = "MedCodeId",
+                                             all.x = TRUE)[, .(consmedcodeid, N, Term)]
+  
+  stopifnot(consultation_interest[, .N] == consultation_interest_reason_term[, sum(N)])
+  
+  consultation_interest_reason_term[, N := round(N/5)*5]
+  
+  consultation_interest_reason_term[ N == 0 | N == 5, N := NA]
+  
+  setorder(consultation_interest_reason_term, consmedcodeid, Term, N)
+  
+  consultation_interest_reason_term <- consultation_interest_reason_term[order(-N, na.last = TRUE)]
+
+```  
+
+
+```{r consultation_graph, echo = FALSE}
+
+## Create a date, ceiling-ed, for each consultation
+
+   consultation_interest[, consultation_month_date := make_date(year = consdate_year, month = consdate_month, day = "01")]
+
+
+## Plot graph of consultation by year and month around period of interest
+## Have checked that there is no missing patid's, consid's, pracid's, consdate's
+
+  ggplot(consultation_interest,
+         aes(x = consultation_month_date)) +
+    geom_bar(position = "dodge") +
+    ggtitle("Number of consultations by month and year")
+    
+```
+
+

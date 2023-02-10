@@ -1,0 +1,409 @@
+---
+title: "CPRD_data_checking"
+author: "Ric Campbell"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+## FOR INTERNAL PROJECT USE ONLY, PLEASE DO NOT SHARE BEYOND PROJECT TEAM
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(DataExplorer)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(kableExtra)
+library(knitr)
+library(readxl)
+library(aurumpipeline)
+library(arrow)
+```
+
+```{r set_up_patient_practice_data, echo = FALSE}
+
+## Read in single file tables that want to check contain the same ids as each other, e.g. all 
+
+  patients <- fread("D:/source_data/Deliveryv2/Data/Primary care/TRAINS_Extract_Patient_001.txt",
+                    colClasses = "character",
+                    na.strings = "")
+  
+  practices <- fread("D:/source_data/Deliveryv2/Data/Primary care/TRAINS_Extract_Practice_001.txt",
+                    colClasses = "character",
+                    na.strings = "")
+  
+  linkage_availability <- fread("D:/source_data/Deliveryv2/Data/Linked data/linkage_eligibility_aurumv2.txt",
+                                colClasses = "character",
+                                na.strings = "")
+  
+  
+  
+  patient_imd <- fread("D:/source_data/Deliveryv2/Data/Linked data/patient_imd2019_set22v2.txt",
+                       colClasses = "character",
+                       na.strings = "")
+  
+  randomisation <- fread("D:/reference_data/TRAINS Randomisation for CPRD.txt",
+                         colClasses = "character",
+                         na.strings = "")
+  
+  setnames(randomisation, make.names(colnames(randomisation), unique = TRUE))
+
+  
+## Change any dates to date types if needed for this
+  
+  patients[, cprd_ddate := as.Date(cprd_ddate, format = "%d/%m/%Y")]
+  
+## Patients without a imd index
+  
+  patients_no_imd <- patients[patid %chin% setdiff(patients[, patid], patient_imd[, patid])]
+    
+##  Practices that were randomised but not in practice/patient file
+
+  practices_randomised_no_data <- randomisation[CPRDPracticeId %chin% setdiff(randomisation[, CPRDPracticeId], practices[, pracid])]
+  
+
+## Get number of patients per practice, and create field for groups of patients per practice
+  
+  number_patients_per_practice <- patients[, .N, by = pracid][order(N)]
+  
+  number_patients_per_practice[, patient_number_group := cut(N, c(0, 10, 100, 200, 300, 400, 500, 600, 800), include.lowest = TRUE)]
+  
+
+## Calculate age at end of primary outcome measure point - 1st August to 30th September 2021
+  ## ~~~~ In future will want age to be calculated from 2022-09-01 ~~~~~
+## So if born in September, they will have had birthday that year
+## Easier to create fake date of birth to use lubridate for interval  
+  
+  patients[, created_dob := make_date(year = yob, month = mob, day = "01")]
+  
+  patients[, age := as.integer(interval(created_dob, as.Date("2021-09-30"))/dyears(1))]
+  
+  
+## Merge practice randomisation to each patient to see split by arm, want to keep all patients
+  
+  patients_rand <- merge(patients,
+                         randomisation[, .(CPRDPracticeId, Randomisation, Randomisation.Code)],
+                         by.x = "pracid",
+                         by.y = "CPRDPracticeId",
+                         all = TRUE)
+  
+  stopifnot(patients[, .N] != patients_rand[, .N])
+
+```
+
+``` {R set_up_parquet_data, echo = FALSE}
+
+## Create link to parquet files needed
+
+  observation <- arrow::open_dataset("D:/source_data/parquet_v2/observation",
+                                        format = "parquet")
+
+  drug <- arrow::open_dataset("D:/source_data/parquet_v2/drug",
+                               format = "parquet")
+  
+## Get the count of each code in observations in data table
+  
+  diag_counts <- data.table(observation %>%
+                              select(medcodeid) %>%
+                              map_batches(function(batch) {
+                                batch %>%
+                                  group_by(medcodeid) %>%
+                                  summarise(N = n())
+                              }) %>%
+                            group_by(medcodeid) %>%
+                            summarise(N = sum(N))
+                            )
+  
+  drug_counts <- data.table(drug %>%
+                              select(prodcodeid) %>%
+                              map_batches (function(batch) {
+                                batch %>%
+                                  group_by(prodcodeid) %>%
+                                  summarise(N = n())  
+                              }) %>%
+                            group_by(prodcodeid) %>%
+                            summarise(N = sum(N))
+                            )
+                              
+  
+  
+## Read in diagnosis code dictionary and merge with terms
+  
+  diag_terms <- fread("D:/reference_data/Asthma diagnosis codes 4 April.txt",
+                      colClasses = "character",
+                      na.strings = "")
+  
+  diag_terms_counts <- merge(diag_counts,
+                             diag_terms[, .(MedCodeId, Term)],
+                             by.x = "medcodeid",
+                             by.y = "MedCodeId",
+                             all = TRUE)
+
+## Read in medicines code dictionary with terms
+  
+  drug_terms <- fread("D:/reference_data/Asthma related drug treatment codes 8 April.txt",
+                      colClasses = "character",
+                      na.string = "")
+  
+  drug_terms_count <- merge(drug_counts,
+                            drug_terms[, .(ProdCodeId, ProductName)],
+                            by.x = "prodcodeid",
+                            by.y = "ProdCodeId",
+                            all = TRUE)
+  
+  
+```
+
+```{R create_patient_desc, echo = FALSE}
+
+## Take number of patients, practices, and patients per practice for report
+  
+  number_of_patients <- sprintf("%1.0f", patients[, .N])
+  number_of_acceptable_patients <- sprintf("%1.0f", patients[acceptable == 1, .N])
+  number_of_not_acceptable_patients <- sprintf("%1.0f", patients[acceptable == 0, .N])
+  number_of_practices <- sprintf("%1.0f", practices[, .N])
+  
+  min_patients_in_practice <- sprintf("%1.0f", number_patients_per_practice[, min(N)])
+  max_patients_in_practice <- sprintf("%1.0f", number_patients_per_practice[, max(N)])
+  
+  number_patients_no_imd <- sprintf("%1.0f", patients_no_imd[, .N])
+  number_practices_randomised_no_data <- sprintf("%1.0f", practices_randomised_no_data[, .N])
+  number_of_practices_no_region <- practices[is.na(region), .N]
+  
+  number_of_patients_lsoa <- sprintf("%1.0f", linkage_availability[lsoa_e == 1, .N])
+  number_of_patients_no_lsoa <- sprintf("%1.0f", linkage_availability[is.na(lsoa_e) | lsoa_e == 0, .N])
+  
+  number_deaths_before_cutoff <- sprintf("%1.0f", patients[!is.na(cprd_ddate) & cprd_ddate < "2021-08-01", .N])
+  
+  
+  
+## Bind all these stats into a table
+  
+  pat_prac_desc <- rbind(number_of_patients, number_of_practices, min_patients_in_practice, max_patients_in_practice, number_of_acceptable_patients,
+                         number_of_not_acceptable_patients, number_patients_no_imd, number_practices_randomised_no_data, number_of_practices_no_region,
+                         number_of_patients_lsoa, number_of_patients_no_lsoa, number_deaths_before_cutoff)
+
+```
+
+
+## Patient and Practice Counts
+
+Table showing the number of patients and practices, and the min and max values of the number of patients per pratice in the dataset received
+
+```{r pat_prac_desc, echo = FALSE}
+
+  kable_styling(kable(pat_prac_desc, col.names = "value"),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+```
+
+## The number of patients by both age and gender in the dataset received
+
+Only male and female gender have been included, less than 8 patients labelled 'I' (indeterminate) not includes
+
+Email from CPRD stated *"However, once the patient turns 16 years of age the month is reset to 0. This change takes place at the practice or where a practice has stopped contributing month is reset in house by CPRD. This means that patients with a date of birth in 2006 and 2005 do not have a month of birth"*
+
+Extract was created using the May CPRD Aurum release, assuming month field was updated on 31st May, 1st June 2006 would still be 15 and should have a month still available. There are no patients with a month of 0.
+
+Table 3 is all patients with year of birth of 2005 by month of birth
+Table 4 is all patients with year of birth of 2006 by month of birth
+
+Numbers in the table have been rounded to the nearest 5 inline with stats disclosure rules
+
+```{r, pat_age_gend, echo = FALSE}
+
+  kable_styling(kable(patients[, .N, by = mob][order(as.integer(mob))][, N := round(N/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+  kable_styling(kable(patients[, .N, by = yob][order(as.integer(yob))][, N := round(N/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+```
+
+## 2005
+
+```{r, 2005, echo = FALSE}
+
+  kable_styling(kable(patients[yob == "2005", .N, by = mob][order(as.integer(mob))][, N := round(N/5)*5][, N := as.character(N)][N == "5", N := "*"], align = "l"),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+```
+
+## 2006
+
+```{r 2006, echo = FALSE}
+
+  kable_styling(kable(patients[yob == "2006", .N, by = mob][order(as.integer(mob))][, N := round(N/5)*5][, N := as.character(N)][N == "5", N := "*"], align = "l"),
+   
+                             bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+```
+
+```{r dob_graph, echo = FALSE}
+
+  ggplot(patients[(gender == 1 | gender == 2) & !is.na(mob)],
+         aes(x = created_dob, fill = gender)) +
+    geom_bar(position = "dodge") +
+    ggtitle("Number of patients by age and gender") +
+    scale_fill_discrete(labels = c("Male", "Female"))
+
+```
+
+## The number patients in each practice
+
+N.B Numbers in the table have been rounded to the nearest 5 inline with stats discloure rules
+
+```{r patient_per_prac, echo = FALSE}
+
+  ggplot(number_patients_per_practice,
+         aes(x = patient_number_group, y = N, fill = patient_number_group))+
+    geom_bar(stat = "identity") + 
+    ggtitle("Number of patients per pratice") + 
+    scale_x_discrete(name = " Patients in practice")
+
+## table of this as well
+  kable_styling(kable(number_patients_per_practice[, .N, by = patient_number_group][N < 8, N := 1][, N := as.character(N)][N == "1", N := "*"][N != "*", N := round(as.integer(N)/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+  
+```  
+
+
+## The number of patients in each arm of the trial
+
+N.B Numbers in the table have been rounded to the nearest 5 inline with stats disclosure rules
+
+```{r patients_rand, echo = FALSE}
+
+  ggplot(patients_rand,
+         aes(x = Randomisation, fill = Randomisation)) +
+    geom_bar() + 
+    ggtitle(("Number of patients per arm"))  
+
+  kable_styling(kable(patients_rand[, .N, by = Randomisation][, N := round(N/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+  
+  
+```
+
+## Number of observations per term in the full dataset of observations provided
+
+Only the diagnosis/terms that were selected in our code list are presented below, there are 39,766 other diagnosis present in the data.
+
+N.B Numbers in the tables have been rounded to the nearest 5, with numbers under 8 being suppressed inline with stats disclosure rules.
+
+```{r observation_counts, echo = FALSE}
+
+  kable_styling(kable(diag_terms_counts[!is.na(Term)][order(N)][N < 8, N := 1][, N := as.character(N)][N == "1", N := "*"][N != "*", N := round(as.integer(N)/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+```
+
+## Number of drugs per product name in the full dataset of drugs issued provided
+
+Only the drugs/terms that were selected in our code list are presented below, there are 8,223 other drugs present in the data.
+
+N.B Numbers in the tables have been rounded to the nearest 5, with numbers under 8 being suppressed inline with stats disclosure rules.
+
+```{r drug_counts, echo = FALSE}
+
+  kable_styling(kable(drug_terms_count[!is.na(ProductName) & ProductName != "NULL"][order(N)][N < 8, N := 1][, N := as.character(N)][N == "1", N := "*"][N != "*", N := round(as.integer(N)/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+```
+
+## The number of observations, over time grouped by month, includes all observations in the provided data
+
+```{r obs_graph, echo = FALSE}
+
+## Graph, from parquet file, of all observations in data, over time grouped by month
+
+  ggplot(observation %>%
+           select(obsdate) %>%
+           filter(obsdate != "obsdate" & !is.na(obsdate) & obsdate != "") %>%
+           map_batches(function(batch) {
+             batch %>%
+              mutate(obsdate_month = paste0("01/", substr(obsdate, 4, 10))) %>%
+              mutate(obsdate_month = as.Date(obsdate_month, format = "%d/%m/%Y")) %>%
+              group_by(obsdate_month) %>%
+              summarise(N = n())    
+           }) %>%
+           filter(obsdate_month >= "2004-01-01" & obsdate_month <= "2022-07-15") %>%
+          group_by(obsdate_month) %>%
+          summarise(N = sum(N)),
+         aes(x = obsdate_month, y = N)) +
+    geom_point() + 
+    geom_smooth() + 
+    scale_y_continuous(labels = scales::comma) + 
+    ggtitle("Number of observations over time by month for all patients")
+
+
+```
+
+## The number of drug prescriptions, over time grouped by month, includes all observations in the provided data
+
+```{r drug_graph, echo = FALSE}
+
+## Graph, from parquet file, of all drugs in data, over time grouped by month
+
+  ggplot(drug %>%
+           select(issuedate) %>%
+           filter(issuedate != "issuedate" & !is.na(issuedate) & issuedate != "") %>%
+           map_batches(function(batch) {
+             batch %>%
+              mutate(issuedate_month = paste0("01/", substr(issuedate, 4, 10))) %>%
+              mutate(issuedate_month = as.Date(issuedate_month, format = "%d/%m/%Y")) %>%
+              group_by(issuedate_month) %>%
+              summarise(N = n())
+           }) %>%
+           filter(issuedate_month >= "2004-01-01" & issuedate_month <= "2022-07-15") %>%
+           group_by(issuedate_month) %>%
+           summarise(N = sum(N)),
+         aes(x = issuedate_month, y = N)) +
+    geom_point() + 
+    geom_smooth() + 
+    scale_y_continuous(labels = scales::comma) + 
+    ggtitle("Number of drug prescriptions over time by month for all patients")
+
+```
+
+## Table for the last years worth of data where points appear to drop to low numbers in above graphs
+
+```{r obs_small_table, echo = FALSE}
+
+## Table for all observations from July 2021 until end
+
+kable_styling(kable(
+  observation %>%
+       select(obsdate) %>%
+       filter(obsdate != "obsdate" & !is.na(obsdate) & obsdate != "") %>%
+       map_batches(function(batch) {
+         batch %>%
+          mutate(obsdate_month = paste0("01/", substr(obsdate, 4, 10))) %>%
+          mutate(obsdate_month = as.Date(obsdate_month, format = "%d/%m/%Y")) %>%
+          group_by(obsdate_month) %>%
+          summarise(N = n())
+       }) %>%
+       filter(obsdate_month >= "2021-07-01" & obsdate_month <= "2022-07-15") %>%
+       group_by(obsdate_month) %>%
+       summarise(N = sum(N))
+), bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+
+kable_styling(kable(
+  drug %>%
+     select(issuedate) %>%
+     filter(issuedate != "issuedate" & !is.na(issuedate) & issuedate != "") %>%
+     map_batches(function(batch) {
+       batch %>%
+        mutate(issuedate_month = paste0("01/", substr(issuedate, 4, 10))) %>%
+        mutate(issuedate_month = as.Date(issuedate_month, format = "%d/%m/%Y")) %>%
+        group_by(issuedate_month) %>%
+        summarise(N = n())
+     }) %>%
+     filter(issuedate_month >= "2021-07-01" & issuedate_month <= "2022-07-15") %>%
+     group_by(issuedate_month) %>%
+     summarise(N = sum(N))
+), bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+```
+
+

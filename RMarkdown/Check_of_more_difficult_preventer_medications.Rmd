@@ -1,0 +1,101 @@
+---
+title: "Check of more difficult preventer medications"
+author: "Ric Campbell"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+## FOR INTERNAL PROJECT USE ONLY, PLEASE DO NOT SHARE BEYOND PROJECT TEAM
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(readxl)
+library(arrow)
+library(dplyr)
+library(googlesheets4)
+library(ggplot2)
+library(kableExtra)
+library(knitr)
+```
+
+```{r get_google_access, echo = FALSE}
+
+## Give script permission to use auth token found in cache
+
+## warning("Your must have connected to your Google account prior to running this script as it uses the auth token found in the cache")
+# gs4_auth() - may need re-doing even if have not shut down RStudio
+# Then run markdown from console:
+# rmarkdown::render("RMarkdown/Check_of_more_difficult_preventer_medications.Rmd")
+
+options(gargle_oauth_email = TRUE)
+
+```
+
+```{r get_drug_codes, include = FALSE}
+
+## Read in diagnosis code list that has been created, now has preventer_reliver col (might be updated)
+  
+  drug_meta_location <- as.character(as_sheets_id("https://docs.google.com/spreadsheets/d/1LfbKdBY4ygA6hWIMZbFCVlTm3Ecnf2z2ktl8FEZtleE/edit#gid=1523310571")) 
+  
+  drug_meta <- data.table(range_read(drug_meta_location,
+                                     sheet = "asthma_drugs",
+                                     col_types = "c"))
+  
+  non_reliver_meds <- drug_meta[preventer_reliver != "reliver"]
+  
+```
+
+```{r point_to_data, include = FALSE}
+
+## Point to parqueet file of drugs prescribed, asthma related only
+
+  drug <- arrow::open_dataset("D:/TRAINS/data/parquet/drug",
+                               format = "parquet")
+
+```
+
+```{r get_counts, include = FALSE}
+
+## Get counts of the drugs that we are interested in
+
+  drug_counts <- data.table(drug %>%
+                              filter(asthma_drug == "true") %>%
+                              select(prodcodeid) %>%
+                              mutate(drug_type = prodcodeid %in% non_reliver_meds$ProdCodeId) %>%
+                              filter(drug_type == TRUE) %>%
+                              map_batches (function(batch) {
+                                batch %>%
+                                  group_by(prodcodeid) %>%
+                                  summarise(N = n())
+                              }) %>%
+                            group_by(prodcodeid) %>%
+                            summarise(N = sum(N))
+                            )
+
+  # drug_counts <- data.table(drug %>%
+  #                             filter(asthma_drug == "true") %>%
+  #                             select(prodcodeid) %>%
+  #                             head(., 10000) %>%
+  #                             collect())
+  # 
+  # drug_counts <- drug_counts[,.N,by=prodcodeid]
+
+  drug_type_counts <- merge(drug_counts,
+                            non_reliver_meds[preventer_reliver != "preventer", .(ProdCodeId, preventer_reliver, TermfromEMIS)],
+                            by.x = "prodcodeid",
+                            by.y = "ProdCodeId",
+                            all.y = TRUE)[order(N)]
+  
+                            
+```
+
+
+# Table of all asthma medications that are not easily grouped as either a reliver or a preventer inhaler.
+
+```{r create_table, echo = FALSE}
+
+ kable_styling(kable(drug_type_counts[N < 8, N := 1][, N := as.character(N)][N == "1", N := "*"][N != "*", N := round(as.integer(N)/5)*5]),
+                bootstrap_options = c("striped", "hover", "condensed"), fixed_thead = TRUE)
+
+```
