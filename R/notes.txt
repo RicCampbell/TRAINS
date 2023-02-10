@@ -1,0 +1,76 @@
+## Things to think about/remember
+## - There are multiple tables in the data we will receive
+## - Field names are not unique across tables (constype appears in more than one table)
+## - Some "id" fields are not unique, e.g. consid, and have to be used on conjunction with others (p_patid)
+
+## Dates could be in dd/mm/yyyy format
+
+## Do we have a list of unique CPRD codes that we are interested in?
+##  - this is for medcode field in Clinical table
+
+## Notes taken from the overview CONSORT diagram 
+## - Remember to check for full duplicates
+## - Remember to reduce to the date range that we are interested in
+## - Look at the number of clinical and consultation records that join up
+## - WANT TO LOOK AT LEFT HALF OF DIAGRAM WHEN UNDERSTAND THE DATA BETTER
+##   - THINK it's to do with, scheduled/unscheduled can be deferred by either the code that you can link to a person/visit, or the type of visit it was 
+##     deemed in other table
+##
+## - Consultation date does not always match the date event date recorded for that consultation within other tables
+##   - Non matched records in 'clincial' table were included if relavent - This is in a table in doc ******
+##   - Non matched records in immunisation, therapy, referral, and test were not included
+
+### - List of 'ummatched/historical' codes that are used needs to be created from data management process doc - but they don't have code, just description ****
+## Ah crap there's some fun 'vague' rules that they applied e.g. medcode desc includes word "seen", included this
+## Then everything else still not matched, were included!! ****
+
+## This might be a list that we have to get checked over again by Rami
+
+
+## Something about using 'medcode description' first in the clinical data (table), then the consultation type, then look at the other tables
+
+## Three lists of Medcode descriptions for splitting into scheduled/unscheduled, not applicable, and unknown ***** WILL NEED THESE
+## Again there are extra 'rules' that need to be applied
+
+## If not coded looking at the medcode description ('medcode'), then look at consultation type
+
+
+## If a consultation has conflicting contact types, unscheduled takes precedence, then scheduled, then unknown
+
+
+## Unmatched consultation records or those matched with  unknown clinical data, are determinded by looking at;
+## immunistaion data, then therapy, then referral then test data
+
+## Have to look out for 'historical data'??
+
+
+### I think we're getting data from the AURUM dataset, while PLEASANT was working from the GOLD dataset - collected from different GP software
+
+library(data.table)
+library(readxl)
+
+  asthma_inclusions <- fread("D:/reference_data/asthma_inclusions.csv",
+                             colClasses = "character")
+  
+  asthma_exclusions <- fread("D:/reference_data/asthma_exclusions.csv",
+                             colClasses = "character")
+
+## The two files downloaded from the data processing document
+ ## I think this is list of CPRD unique codes, table 'Clinical', field 'medcode' 
+  pegasus <- fread("D:/reference_data/data_management_process_appendix/pegasus_medical_appendix.txt",
+                   colClasses = "character")
+  
+ ## I think this is list of entity type, table 'Clinical' and 'Test', field 'enttype'
+  entity <- data.table(read_xlsx("D:/reference_data/data_management_process_appendix/entity_appendix.xlsx",
+                  sheet = "entity"))
+    
+  
+## I think this is the coding to the 'Clinical' table, field 'constype'
+  
+  cot <- data.table(read_xlsx("D:/reference_data/cot.xlsx",
+                              sheet = "Sheet1",
+                              col_names = TRUE))
+  
+  ## Need to change coloumn names
+  
+  
